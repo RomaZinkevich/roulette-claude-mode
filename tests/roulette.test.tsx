@@ -88,3 +88,50 @@ test('the terminal draws the wheel beside the table; other surfaces skip it', as
   expect(await desktop.find({ type: 'Text', text: /Roulette/ })).toBeDefined()
   await desktop.unmount()
 })
+
+test('/roulette always keeps the table up between turns, /roulette thinking hides it', async ($, on) => {
+  mock.store(on)
+  on('command.run', () => ({ text: '' }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  const run = (args: string) =>
+    $.command.run({ command: 'roulette', args } as never) as Promise<{ text?: string }>
+
+  const before = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(false) as never })
+  expect(await before.find({ type: 'Text', text: /Roulette/ })).toBeUndefined()
+  await before.unmount()
+
+  expect((await run('always')).text).toMatch(/always/)
+  const always = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(false) as never })
+  expect(await always.find({ type: 'Text', text: /Roulette/ })).toBeDefined()
+  await always.unmount()
+
+  expect((await run('')).text).toMatch(/thinking/)
+  const thinking = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(false) as never })
+  expect(await thinking.find({ type: 'Text', text: /Roulette/ })).toBeUndefined()
+  await thinking.unmount()
+
+  expect((await run('nope')).text).toMatch(/Usage/)
+})
+
+test('/roulette reset refills a busted bankroll mid-turn', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.run', () => ({ text: '' }))
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(true) as never })
+
+  await ui.press({ key: 'chip-5' })
+  for (let i = 0; i < 60 && !(await ui.find({ type: 'Text', text: /Game over/ })); i += 1) {
+    await ui.press({ key: 'pick-green' })
+    await clock.advance(5000)
+  }
+  expect(await ui.find({ type: 'Text', text: /Game over/ })).toBeDefined()
+
+  const reset = (await $.command.run({ command: 'roulette', args: 'reset' } as never)) as { text?: string }
+  expect(reset.text).toMatch(/\$1,000/)
+  expect(await ui.find({ type: 'Text', text: /Game over/ })).toBeUndefined()
+  expect(await balanceOf(ui)).toBe(1000)
+  expect(await ui.find({ key: 'pick-red' })).toBeDefined()
+  await ui.unmount()
+})

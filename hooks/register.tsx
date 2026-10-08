@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Bet, Game, Pick } from '../types'
+import type { Bet, Game, Mode, Pick } from '../types'
 import { drawWheel } from './wheel'
 
 const BANKROLL = 1000
@@ -45,6 +45,11 @@ const INITIAL: Game = {
   isBust: false,
 }
 const game = atom({ plugin: 'roulette', key: 'game' } as const, INITIAL)
+const mode = atom({ plugin: 'roulette', key: 'mode' } as const, 'thinking' as Mode)
+const MODE_KEY = 'mode'
+
+const isMode = (value: unknown): value is Mode =>
+  value === 'thinking' || value === 'always'
 
 const colorOf = (n: number): Pick =>
   n === 0 ? 'green' : REDS.has(n) ? 'red' : 'black'
@@ -156,6 +161,17 @@ export const register: Register = on => {
     // A reload drops the old timer: land any spin it left mid-air.
     await update($, game, settle)
 
+    const stored = await $.store.get(MODE_KEY)
+    if (isMode(stored)) {
+      await update($, mode, () => stored)
+    }
+    await $.command.register({
+      name: 'roulette',
+      description: 'Roulette table: show it always, or only while Claude thinks',
+      argumentHint: '[always|thinking|reset]',
+      immediate: true,
+    })
+
     return next(e)
   })
 
@@ -168,8 +184,35 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('command.run', { command: 'roulette' }, async ($, e) => {
+    const asked = e.args.trim().toLowerCase()
+    if (asked === 'reset') {
+      // Back to a full bankroll; a spin in the air is called off, stake kept.
+      await update($, game, g => ({ ...INITIAL, bet: g.bet, pointer: g.pointer }))
+      return { text: `Roulette bankroll reset to ${money(BANKROLL)}.` }
+    }
+    if (asked !== '' && !isMode(asked)) {
+      return { text: 'Usage: /roulette [always|thinking|reset]' }
+    }
+    const current = await read($, mode)
+    const chosen: Mode =
+      asked !== '' ? asked : current === 'always' ? 'thinking' : 'always'
+    await update($, mode, () => chosen)
+    await $.store.set(MODE_KEY, chosen)
+
+    return {
+      text:
+        chosen === 'always'
+          ? 'Roulette table is always shown.'
+          : 'Roulette table shows only while Claude is thinking.',
+    }
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || !e.props.isWorking) {
+    if (
+      e.props.hasSurvey ||
+      (!e.props.isWorking && (await read($, mode)) !== 'always')
+    ) {
       return next(e)
     }
 
