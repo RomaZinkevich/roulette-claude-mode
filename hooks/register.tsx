@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Bet, Game, Mode, Pick } from '../types'
-import { drawWheel } from './wheel'
+import { MAX_WHEEL_ROWS, MIN_WHEEL_ROWS, drawWheel, wheelColumnsOf } from './wheel'
 
 const BANKROLL = 1000
 const MIN_BET = 50
@@ -34,6 +34,8 @@ const BACKGROUND: Record<Pick, string> = {
 }
 
 const SPIN_FRAMES = 30
+// The narrowest the table beside the wheel goes before the wheel shrinks.
+const TABLE_COLUMNS = 44
 const FRAME_MS = 70
 
 const INITIAL: Game = {
@@ -72,18 +74,10 @@ const positionAt = (from: number, distance: number, frame: number) =>
 const pointerAt = (from: number, distance: number, frame: number) =>
   Math.round(positionAt(from, distance, frame)) % WHEEL.length
 
-// The ball runs the other way round the track, slows, and drops into the
-// pocket under the top as the wheel stops.
-const ballAt = (frame: number) => {
-  const t = Math.min(1, frame / SPIN_FRAMES)
-  const drop = Math.min(1, Math.max(0, (t - 0.75) / 0.25))
-  return {
-    angle: -Math.PI / 2 - 5 * Math.PI * (1 - t) ** 2,
-    radius: 0.83 - 0.13 * drop,
-  }
-}
-
-const RESTING_BALL = { angle: -Math.PI / 2, radius: 0.7 }
+// The ball runs the other way round the wheel, slows, and settles by the
+// pocket under the pointer as the wheel stops: a slot, clockwise from it.
+const ballAt = (frame: number) =>
+  -WHEEL.length * 2.5 * (1 - Math.min(1, frame / SPIN_FRAMES)) ** 2
 
 const stakeOf = (g: Game) =>
   g.bet === 'all' ? g.balance : Math.min(g.bet, g.balance)
@@ -251,13 +245,19 @@ export const register: Register = on => {
     const pointer = g.spin
       ? pointerAt(g.spin.from, g.spin.distance, g.spin.frame)
       : g.pointer
-    const artRows = Math.min(12, e.props.maxRows)
-    const hasArt =
-      e.surface === 'terminal' &&
-      artRows >= 7 &&
-      e.props.bodyColumns >= artRows * 2 + 2 + 46
-    const room = e.props.bodyColumns - (hasArt ? artRows * 2 + 2 : 0)
-    const shown = Math.max(3, Math.min(13, Math.floor((room - 2) / 4))) | 1
+    // The biggest wheel (odd rows) the band's rows and the table's width
+    // leave room for; none below the smallest.
+    let wheelRows = Math.min(MAX_WHEEL_ROWS, e.props.maxRows)
+    wheelRows -= 1 - (wheelRows % 2)
+    while (
+      wheelRows >= MIN_WHEEL_ROWS &&
+      TABLE_COLUMNS + 2 + wheelColumnsOf(wheelRows) > e.props.bodyColumns
+    ) {
+      wheelRows -= 2
+    }
+    const hasArt = e.surface === 'terminal' && wheelRows >= MIN_WHEEL_ROWS
+    const shown =
+      Math.max(3, Math.min(13, Math.floor((e.props.bodyColumns - 2) / 4))) | 1
     const half = (shown - 1) / 2
     const pockets = Array.from({ length: shown }, (_, i) => {
       const index = (pointer - half + i + WHEEL.length * 2) % WHEEL.length
@@ -266,13 +266,13 @@ export const register: Register = on => {
 
     const art = hasArt
       ? drawWheel(
-          artRows,
+          wheelRows,
           g.spin
             ? {
                 position: positionAt(g.spin.from, g.spin.distance, g.spin.frame),
                 ball: ballAt(g.spin.frame),
               }
-            : { position: g.pointer, ball: g.last ? RESTING_BALL : null },
+            : { position: g.pointer, ball: g.last ? 0 : null },
           WHEEL,
           REDS,
         )
@@ -291,22 +291,26 @@ export const register: Register = on => {
             </Text>
           )}
         </Box>
-        <Box flexDirection="row">
-          <Text>{' '.repeat(half * 4 + 1)}</Text>
-          <Text color="warning">▼</Text>
-        </Box>
-        <Box key="wheel" flexDirection="row">
-          {pockets.map((n, i) => (
-            <Text
-              backgroundColor={BACKGROUND[colorOf(n)]}
-              color="#ffffff"
-              bold={i === half}
-              underline={i === half}
-            >
-              {String(n).padStart(3, ' ') + ' '}
-            </Text>
-          ))}
-        </Box>
+        {art === null && (
+          <Box key="strip" flexDirection="column">
+            <Box flexDirection="row">
+              <Text>{' '.repeat(half * 4 + 1)}</Text>
+              <Text color="warning">▼</Text>
+            </Box>
+            <Box flexDirection="row">
+              {pockets.map((n, i) => (
+                <Text
+                  backgroundColor={BACKGROUND[colorOf(n)]}
+                  color="#ffffff"
+                  bold={i === half}
+                  underline={i === half}
+                >
+                  {String(n).padStart(3, ' ') + ' '}
+                </Text>
+              ))}
+            </Box>
+          </Box>
+        )}
         {g.isBust ? (
           <Text color="error">
             Game over. The bankroll refills to {money(BANKROLL)} the next time
@@ -363,9 +367,14 @@ export const register: Register = on => {
     const { Raster } = $.ui.resolve(e)
 
     return (
-      <Box flexDirection="row" gap={2}>
-        <Raster key="wheel-art" {...art} />
+      <Box
+        flexDirection="row"
+        gap={2}
+        width={e.props.bodyColumns}
+        justifyContent="space-between"
+      >
         {table}
+        <Raster key="wheel-art" {...art} />
       </Box>
     )
   })

@@ -73,10 +73,11 @@ test('going broke ends the game until the next turn', async ($, on) => {
   await ui.unmount()
 })
 
-test('the terminal draws the wheel beside the table; other surfaces skip it', async ($, on) => {
+test('the terminal draws the wheel beside the table; other surfaces show the strip', async ($, on) => {
   const clock = mock.clock(on)
   const terminal = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(true) as never })
   expect(await terminal.find({ key: 'wheel-art' })).toBeDefined()
+  expect(await terminal.find({ key: 'strip' })).toBeUndefined()
   await terminal.press({ key: 'pick-black' })
   await clock.advance(1000)
   expect(await terminal.find({ key: 'wheel-art' })).toBeDefined()
@@ -85,8 +86,28 @@ test('the terminal draws the wheel beside the table; other surfaces skip it', as
 
   const desktop = await $.ui.mount({ ...BAND, surface: 'desktop', props: props(true) as never })
   expect(await desktop.find({ key: 'wheel-art' })).toBeUndefined()
+  expect(await desktop.find({ key: 'strip' })).toBeDefined()
   expect(await desktop.find({ type: 'Text', text: /Roulette/ })).toBeDefined()
   await desktop.unmount()
+})
+
+test('a short, narrow band gets a smaller wheel; too small a one gets the strip', async ($, on) => {
+  const small = await $.ui.mount({
+    ...BAND,
+    surface: 'terminal',
+    props: { ...props(true), maxRows: 8, bodyColumns: 69 } as never,
+  })
+  expect(await small.find({ key: 'wheel-art' })).toBeDefined()
+  await small.unmount()
+
+  const tiny = await $.ui.mount({
+    ...BAND,
+    surface: 'terminal',
+    props: { ...props(true), maxRows: 6, bodyColumns: 69 } as never,
+  })
+  expect(await tiny.find({ key: 'wheel-art' })).toBeUndefined()
+  expect(await tiny.find({ key: 'strip' })).toBeDefined()
+  await tiny.unmount()
 })
 
 test('/roulette always keeps the table up between turns, /roulette thinking hides it', async ($, on) => {
