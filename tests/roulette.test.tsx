@@ -72,3 +72,19 @@ test('going broke ends the game until the next turn', async ($, on) => {
   expect(await balanceOf(ui)).toBe(1000)
   await ui.unmount()
 })
+
+test('the terminal draws the wheel beside the table; other surfaces skip it', async ($, on) => {
+  const clock = mock.clock(on)
+  const terminal = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(true) as never })
+  expect(await terminal.find({ key: 'wheel-art' })).toBeDefined()
+  await terminal.press({ key: 'pick-black' })
+  await clock.advance(1000)
+  expect(await terminal.find({ key: 'wheel-art' })).toBeDefined()
+  await clock.advance(5000)
+  await terminal.unmount()
+
+  const desktop = await $.ui.mount({ ...BAND, surface: 'desktop', props: props(true) as never })
+  expect(await desktop.find({ key: 'wheel-art' })).toBeUndefined()
+  expect(await desktop.find({ type: 'Text', text: /Roulette/ })).toBeDefined()
+  await desktop.unmount()
+})

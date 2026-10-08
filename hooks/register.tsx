@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Bet, Game, Pick } from '../types'
+import { drawWheel } from './wheel'
 
 const BANKROLL = 1000
 const MIN_BET = 50
@@ -56,9 +57,26 @@ const randomPocket = () => (crypto.getRandomValues(new Uint32Array(1))[0] ?? 0) 
 
 const easeOut = (t: number) => 1 - (1 - t) ** 3
 
+// Where the wheel stands, in pockets turned past the top: fractional while
+// it spins, so the drawn wheel turns smoothly.
+const positionAt = (from: number, distance: number, frame: number) =>
+  from + distance * easeOut(Math.min(1, frame / SPIN_FRAMES))
+
 const pointerAt = (from: number, distance: number, frame: number) =>
-  Math.round(from + distance * easeOut(Math.min(1, frame / SPIN_FRAMES))) %
-  WHEEL.length
+  Math.round(positionAt(from, distance, frame)) % WHEEL.length
+
+// The ball runs the other way round the track, slows, and drops into the
+// pocket under the top as the wheel stops.
+const ballAt = (frame: number) => {
+  const t = Math.min(1, frame / SPIN_FRAMES)
+  const drop = Math.min(1, Math.max(0, (t - 0.75) / 0.25))
+  return {
+    angle: -Math.PI / 2 - 5 * Math.PI * (1 - t) ** 2,
+    radius: 0.83 - 0.13 * drop,
+  }
+}
+
+const RESTING_BALL = { angle: -Math.PI / 2, radius: 0.7 }
 
 const stakeOf = (g: Game) =>
   g.bet === 'all' ? g.balance : Math.min(g.bet, g.balance)
@@ -160,15 +178,34 @@ export const register: Register = on => {
     const pointer = g.spin
       ? pointerAt(g.spin.from, g.spin.distance, g.spin.frame)
       : g.pointer
-    const shown =
-      Math.max(3, Math.min(13, Math.floor((e.props.bodyColumns - 2) / 4))) | 1
+    const artRows = Math.min(12, e.props.maxRows)
+    const hasArt =
+      e.surface === 'terminal' &&
+      artRows >= 7 &&
+      e.props.bodyColumns >= artRows * 2 + 2 + 46
+    const room = e.props.bodyColumns - (hasArt ? artRows * 2 + 2 : 0)
+    const shown = Math.max(3, Math.min(13, Math.floor((room - 2) / 4))) | 1
     const half = (shown - 1) / 2
     const pockets = Array.from({ length: shown }, (_, i) => {
       const index = (pointer - half + i + WHEEL.length * 2) % WHEEL.length
       return WHEEL[index] ?? 0
     })
 
-    return (
+    const art = hasArt
+      ? drawWheel(
+          artRows,
+          g.spin
+            ? {
+                position: positionAt(g.spin.from, g.spin.distance, g.spin.frame),
+                ball: ballAt(g.spin.frame),
+              }
+            : { position: g.pointer, ball: g.last ? RESTING_BALL : null },
+          WHEEL,
+          REDS,
+        )
+      : null
+
+    const table = (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={2}>
           <Text bold>Roulette</Text>
@@ -244,6 +281,18 @@ export const register: Register = on => {
         {!g.isBust && !g.spin && (
           <Text dimColor>ctrl+x tab to focus, then use the hotkeys, or click</Text>
         )}
+      </Box>
+    )
+
+    if (art === null || e.surface !== 'terminal') {
+      return table
+    }
+    const { Raster } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="row" gap={2}>
+        <Raster key="wheel-art" {...art} />
+        {table}
       </Box>
     )
   })
