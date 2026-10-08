@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, RenderElement, Register } from 'claude-code'
 
-import type { Bet, Game, Pick } from '../types'
+import type { Bet, Death, Game, Pick } from '../types'
 import { MAX_WHEEL_ROWS, MIN_WHEEL_ROWS, drawWheel, wheelColumnsOf } from './wheel'
 
 const BANKROLL = 1000
@@ -57,6 +57,32 @@ const game = atom({ plugin: 'roulette', key: 'game' } as const, INITIAL)
 const OPEN_KEY = 'isOpen'
 const isMuted = atom({ plugin: 'roulette', key: 'isMuted' } as const, false)
 const MUTED_KEY = 'isMuted'
+// null when death mode is off; never stored, so it never greets a session.
+const death = atom(
+  { plugin: 'roulette', key: 'death' } as const,
+  null as Death | null,
+)
+
+// Frames the losing colour is held before the fake deletion, then the
+// fake-deletion scene's own length. The wheel spins for SPIN_FRAMES.
+const WRONG_FRAMES = 12
+const DOOM_FRAMES = 32
+// The "files" the fake deletion names: a scare, deleted only on screen. Real
+// ones, so it stings; nothing here is ever read or touched on disk.
+const FAKE_PATHS = [
+  'hooks/register.tsx',
+  'hooks/wheel.ts',
+  'types/index.d.ts',
+  'tests/roulette.test.tsx',
+  'package.json',
+  'tsconfig.json',
+  '.git/HEAD',
+  'README.md',
+  'node_modules/',
+  '~/Documents/',
+  '~/.ssh/id_ed25519',
+  'everything else',
+]
 
 const colorOf = (n: number): Pick =>
   n === 0 ? 'green' : REDS.has(n) ? 'red' : 'black'
@@ -173,6 +199,92 @@ const play = async ($: EngineInterface, pick: Pick) => {
   })
 }
 
+let deathTicker: { cancel: () => void } | null = null
+
+const endDeathTicker = () => {
+  deathTicker?.cancel()
+  deathTicker = null
+}
+
+// A pocket that is red or black — death mode never lands on green.
+const deathPocket = () => {
+  let n = randomPocket()
+  while (n === 0) {
+    n = randomPocket()
+  }
+  return n
+}
+
+// Takes the guess and spins the real wheel; then a clean win, or the losing
+// colour held a beat before the fake-deletion scene. No bet, no bankroll.
+const guess = async ($: EngineInterface, pick: Pick) => {
+  const d = await read($, death)
+  if (!d || d.phase !== 'armed') {
+    return
+  }
+  const result = deathPocket()
+  const target = WHEEL.indexOf(result)
+  const distance =
+    WHEEL.length * 2 + ((target - d.from + WHEEL.length) % WHEEL.length)
+  await update($, death, cur =>
+    cur && cur.phase === 'armed'
+      ? { ...cur, phase: 'spinning' as const, pick, result, distance, frame: 0 }
+      : cur,
+  )
+  void playSound($, 'spin.wav')
+  endDeathTicker()
+  deathTicker = $.clock.every(FRAME_MS, () => {
+    void update($, death, cur =>
+      cur && cur.phase !== 'armed' && cur.phase !== 'reprieve' && cur.phase !== 'survived'
+        ? { ...cur, frame: cur.frame + 1 }
+        : cur,
+    ).then(async () => {
+      const now = await read($, death)
+      if (!now) {
+        endDeathTicker()
+        return
+      }
+      if (now.phase === 'spinning' && now.frame >= SPIN_FRAMES) {
+        // The wheel has landed. Rest the pointer on the pocket it stopped on.
+        const from = pointerAt(now.from, now.distance, SPIN_FRAMES)
+        const survived = now.result !== null && colorOf(now.result) === now.pick
+        if (survived) {
+          endDeathTicker()
+        }
+        await update($, death, cur =>
+          cur
+            ? { ...cur, phase: survived ? ('survived' as const) : ('wrong' as const), from, frame: 0 }
+            : cur,
+        )
+        void playSound($, survived ? 'jackpot.wav' : 'lose.wav')
+      } else if (now.phase === 'wrong' && now.frame >= WRONG_FRAMES) {
+        await update($, death, cur => (cur ? { ...cur, phase: 'doom' as const, frame: 0 } : cur))
+      } else if (now.phase === 'doom' && now.frame >= DOOM_FRAMES) {
+        endDeathTicker()
+        await update($, death, cur => (cur ? { ...cur, phase: 'reprieve' as const } : cur))
+      }
+    })
+  })
+}
+
+const armDeath = ($: EngineInterface) => {
+  endDeathTicker()
+  return update($, death, prev => ({
+    phase: 'armed' as const,
+    pick: null,
+    result: null,
+    // Spin on from where the last one landed, so the wheel doesn't jump.
+    from: prev ? prev.from : 0,
+    distance: 0,
+    frame: 0,
+  }))
+}
+
+const leaveDeath = ($: EngineInterface) => {
+  endDeathTicker()
+  return update($, death, () => null)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // A reload drops the old timer: land any spin it left mid-air.
@@ -185,6 +297,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'roulette',
       description: 'Open or close the roulette table beside the conversation',
+      // 'death' is a hidden easter egg, left out of the hint and usage on purpose.
       argumentHint: '[reset|mute|unmute]',
       immediate: true,
     })
@@ -225,8 +338,20 @@ export const register: Register = on => {
       await $.store.set(MUTED_KEY, muted)
       return { text: muted ? 'Roulette sounds off.' : 'Roulette sounds on.' }
     }
+    if (asked === 'death') {
+      // Arm death mode and make sure the pane is up to show it.
+      await armDeath($)
+      await $.ui.open({ id: PANE, title: 'Roulette', columns: PANE_COLUMNS })
+      await $.store.set(OPEN_KEY, true)
+      return { text: 'Death mode armed. It is all bluff — nothing is deleted.' }
+    }
     if (asked !== '') {
       return { text: 'Usage: /roulette [reset|mute|unmute]' }
+    }
+    // A plain /roulette while death mode is up just backs out of it.
+    if ((await read($, death)) !== null) {
+      await leaveDeath($)
+      return { text: 'Left death mode.' }
     }
     if ((await $.ui.panes()).some(pane => pane.id === PANE)) {
       await $.ui.close({ id: PANE })
@@ -244,13 +369,9 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const g = await read($, game)
-    const pointer = g.spin
-      ? pointerAt(g.spin.from, g.spin.distance, g.spin.frame)
-      : g.pointer
-    // Docked, the wheel goes under the table, as wide as the pane; inline,
-    // beside it, as tall as the pane. The biggest (odd rows) that fits, none
-    // below the smallest.
+
+    // The wheel's size and place are the same whatever is on the table.
+    // Docked, it sits above; inline, beside. Biggest odd size that fits.
     const isDocked = e.props.placement === 'dock'
     const { bodyColumns } = e.props
     let wheelRows = Math.min(
@@ -265,6 +386,173 @@ export const register: Register = on => {
       wheelRows -= 2
     }
     const hasArt = e.surface === 'terminal' && wheelRows >= MIN_WHEEL_ROWS
+
+    // Lays a drawn wheel out with the panel: above it docked, beside inline.
+    const withWheel = (
+      art: ReturnType<typeof drawWheel> | null,
+      panel: RenderElement,
+    ): RenderElement => {
+      if (art === null || e.surface !== 'terminal') {
+        return panel
+      }
+      const { Raster } = $.ui.resolve(e)
+      return isDocked ? (
+        <Box flexDirection="column" gap={1} width={bodyColumns}>
+          <Box justifyContent="center">
+            <Raster key="wheel-art" {...art} />
+          </Box>
+          {panel}
+        </Box>
+      ) : (
+        <Box flexDirection="row" gap={2} width={bodyColumns} justifyContent="space-between">
+          {panel}
+          <Raster key="wheel-art" {...art} />
+        </Box>
+      )
+    }
+
+    // Death mode: the same wheel, but no money — red or black, one guess.
+    const d = await read($, death)
+    if (d !== null) {
+      const width = bodyColumns
+
+      if (d.phase === 'doom') {
+        const bar = (filled: number, total: number, lit: string, dim: string) =>
+          lit.repeat(Math.max(0, Math.min(total, filled))) +
+          dim.repeat(Math.max(0, total - filled))
+        // The fake deletion: a scrolling log of paths that are never touched.
+        const log = Array.from({ length: 6 }, (_, i) => {
+          const at = d.frame - (5 - i)
+          return at >= 0 ? FAKE_PATHS[at % FAKE_PATHS.length] ?? '' : null
+        })
+        return (
+          <Box flexDirection="column" width={width}>
+            <Text backgroundColor="#b3262e" color="#ffffff" bold>
+              {' '.repeat(width)}
+            </Text>
+            <Text color="#ff5555" bold>
+              {d.frame % 2 ? '  ☠  DELETING EVERYTHING  ☠' : '     DELETING EVERYTHING'}
+            </Text>
+            <Box flexDirection="column">
+              {log.map((path, i) =>
+                path === null ? (
+                  <Text key={`log-${i}`}> </Text>
+                ) : (
+                  <Text key={`log-${i}`} color="#c0392b">
+                    rm -rf {path}
+                  </Text>
+                ),
+              )}
+            </Box>
+            <Text color="#ff5555">
+              [{bar(Math.round((d.frame / DOOM_FRAMES) * 18), 18, '█', '░')}]
+            </Text>
+          </Box>
+        )
+      }
+
+      if (d.phase === 'reprieve') {
+        return (
+          <Box flexDirection="column" gap={1} width={width}>
+            <Text bold>nvm.</Text>
+            <Text>
+              opus 5.5 said its too destructive and i dont want to argue with
+              super intelligence or lose my claude account
+            </Text>
+            <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+              <Button key="again" plain hotkey="r" label="Again" onPress={() => armDeath($)} />
+              <Button key="leave" plain hotkey="q" label="Leave" onPress={() => leaveDeath($)} />
+            </Box>
+          </Box>
+        )
+      }
+
+      // The wheel: turning while 'spinning', then at rest on the pocket it
+      // stopped on. No ball until it has somewhere to land.
+      const n = d.result ?? 0
+      const deathArt = hasArt
+        ? drawWheel(
+            wheelRows,
+            d.phase === 'spinning'
+              ? {
+                  position: positionAt(d.from, d.distance, d.frame),
+                  ball: ballAt(d.frame),
+                }
+              : { position: d.from, ball: d.result !== null ? 0 : null },
+            WHEEL,
+            REDS,
+          )
+        : null
+
+      if (d.phase === 'survived') {
+        return withWheel(
+          deathArt,
+          <Box flexDirection="column" gap={1}>
+            <Text color="success" bold>
+              SPARED.
+            </Text>
+            <Text>
+              {n} {colorOf(n)}. you called it.
+            </Text>
+            <Text dimColor>the files live. this time.</Text>
+            <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+              <Button key="again" plain hotkey="r" label="Again" onPress={() => armDeath($)} />
+              <Button key="leave" plain hotkey="q" label="Leave" onPress={() => leaveDeath($)} />
+            </Box>
+          </Box>,
+        )
+      }
+
+      if (d.phase === 'wrong') {
+        return withWheel(
+          deathArt,
+          <Box flexDirection="column" gap={1}>
+            <Text color="#ff5555" bold>
+              WRONG.
+            </Text>
+            <Text>
+              {n} {colorOf(n)}. you said {d.pick}.
+            </Text>
+            <Text color="#ff5555">deleting everything…</Text>
+          </Box>,
+        )
+      }
+
+      if (d.phase === 'spinning') {
+        return withWheel(
+          deathArt,
+          <Box flexDirection="column" gap={1}>
+            <Text color="#ff5555" bold>
+              ☠ DEATH ROULETTE ☠
+            </Text>
+            <Text dimColor>you said {d.pick}. round and round…</Text>
+          </Box>,
+        )
+      }
+
+      // armed
+      return withWheel(
+        deathArt,
+        <Box flexDirection="column" gap={1}>
+          <Text color="#ff5555" bold>
+            ☠ DEATH ROULETTE ☠
+          </Text>
+          <Text>No chips. No bankroll. One guess.</Text>
+          <Text dimColor>Guess wrong and every file here is deleted.</Text>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            <Button key="death-red" plain hotkey="r" label="Red" onPress={() => guess($, 'red')} />
+            <Button key="death-black" plain hotkey="b" label="Black" onPress={() => guess($, 'black')} />
+            <Button key="flee" plain hotkey="q" label="Flee" onPress={() => leaveDeath($)} />
+          </Box>
+          <Text dimColor>ctrl+x tab to focus, then press r or b</Text>
+        </Box>,
+      )
+    }
+
+    const g = await read($, game)
+    const pointer = g.spin
+      ? pointerAt(g.spin.from, g.spin.distance, g.spin.frame)
+      : g.pointer
     const shown = Math.max(3, Math.min(13, Math.floor((bodyColumns - 2) / 4))) | 1
     const half = (shown - 1) / 2
     const pockets = Array.from({ length: shown }, (_, i) => {
@@ -369,23 +657,6 @@ export const register: Register = on => {
       </Box>
     )
 
-    if (art === null || e.surface !== 'terminal') {
-      return table
-    }
-    const { Raster } = $.ui.resolve(e)
-
-    return isDocked ? (
-      <Box flexDirection="column" gap={1} width={bodyColumns}>
-        <Box justifyContent="center">
-          <Raster key="wheel-art" {...art} />
-        </Box>
-        {table}
-      </Box>
-    ) : (
-      <Box flexDirection="row" gap={2} width={bodyColumns} justifyContent="space-between">
-        {table}
-        <Raster key="wheel-art" {...art} />
-      </Box>
-    )
+    return withWheel(art, table)
   })
 }

@@ -54,6 +54,39 @@ test('/roulette opens the table in a pane, and again closes it', async ($, on) =
   expect((await run('nope')).text).toMatch(/Usage/)
 })
 
+test('death mode is all bluff: a wrong guess deletes nothing, just performs it', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  on('command.run', () => ({ text: '' }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: props() as never })
+
+  // The game is on the table until death mode is armed.
+  expect(await ui.find({ type: 'Text', text: /DEATH ROULETTE/ })).toBeUndefined()
+  expect((await $.command.run({ command: 'roulette', args: 'death' } as never)) as { text?: string }).toMatchObject({})
+  expect(await ui.find({ type: 'Text', text: /DEATH ROULETTE/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Balance/ })).toBeUndefined()
+
+  // Guess, run the suspense and any fake-deletion scene to the end.
+  await ui.press({ key: 'death-black' })
+  for (let i = 0; i < 20 && !(await ui.find({ type: 'Text', text: /SPARED|nvm/ })); i += 1) {
+    await clock.advance(1000)
+  }
+  // It always lands on a real verdict, and a wrong guess only ever owns up.
+  const spared = await ui.find({ type: 'Text', text: /SPARED/ })
+  const nvm = await ui.find({ type: 'Text', text: /nvm/ })
+  expect(Boolean(spared) || Boolean(nvm)).toBe(true)
+  if (nvm) {
+    expect(await ui.find({ type: 'Text', text: /too destructive/ })).toBeDefined()
+  }
+
+  // Leaving death mode brings the table back.
+  await ui.press({ key: 'leave' })
+  expect(await ui.find({ type: 'Text', text: /DEATH ROULETTE/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Balance/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a spin pays 2x on a colour, 36x on green, or takes the stake', async ($, on) => {
   const clock = mock.clock(on)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: props() as never })
