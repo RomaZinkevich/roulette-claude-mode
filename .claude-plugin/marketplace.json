@@ -1,0 +1,12 @@
+{
+  "name": "roulette-claude-mode",
+  "description": "Play roulette in a pane beside the conversation while Claude is thinking.",
+  "owner": { "name": "RomaZinkevich" },
+  "plugins": [
+    {
+      "name": "roulette",
+      "source": "./",
+      "description": "A roulette table in a pane beside the conversation, with a /roulette command to open, close, reset, or mute it."
+    }
+  ]
+}
