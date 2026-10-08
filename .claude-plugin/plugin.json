@@ -1,6 +1,6 @@
 {
   "name": "roulette",
   "version": "0.1.0",
-  "description": "A roulette table above the prompt to play while Claude is thinking",
+  "description": "A roulette table in a pane beside the conversation, to play while Claude is thinking",
   "types": "./types/index.d.ts"
 }

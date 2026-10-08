@@ -23,7 +23,7 @@ const BAND = 2.2
 
 // The rows a wheel takes: odd, so it sits centred on a row.
 export const MIN_WHEEL_ROWS = 7
-export const MAX_WHEEL_ROWS = 11
+export const MAX_WHEEL_ROWS = 15
 
 // Two cells across per row down: a cell is about twice as tall as wide.
 export const wheelColumnsOf = (rows: number) => rows * 2

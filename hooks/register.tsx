@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Bet, Game, Mode, Pick } from '../types'
+import type { Bet, Game, Pick } from '../types'
 import { MAX_WHEEL_ROWS, MIN_WHEEL_ROWS, drawWheel, wheelColumnsOf } from './wheel'
 
 const BANKROLL = 1000
@@ -34,9 +34,15 @@ const BACKGROUND: Record<Pick, string> = {
 }
 
 const SPIN_FRAMES = 30
-// The narrowest the table beside the wheel goes before the wheel shrinks.
-const TABLE_COLUMNS = 44
 const FRAME_MS = 70
+
+const PANE = 'roulette'
+// The width the pane asks for when docked: room for the biggest wheel.
+const PANE_COLUMNS = 32
+// The narrowest the table beside the wheel goes, inline, before the wheel
+// shrinks; and the rows the table takes above and below it, docked.
+const TABLE_COLUMNS = 44
+const TABLE_ROWS = 10
 
 const INITIAL: Game = {
   balance: BANKROLL,
@@ -47,13 +53,10 @@ const INITIAL: Game = {
   isBust: false,
 }
 const game = atom({ plugin: 'roulette', key: 'game' } as const, INITIAL)
-const mode = atom({ plugin: 'roulette', key: 'mode' } as const, 'thinking' as Mode)
-const MODE_KEY = 'mode'
+// Whether the pane was left open, to open it again next session.
+const OPEN_KEY = 'isOpen'
 const isMuted = atom({ plugin: 'roulette', key: 'isMuted' } as const, false)
 const MUTED_KEY = 'isMuted'
-
-const isMode = (value: unknown): value is Mode =>
-  value === 'thinking' || value === 'always'
 
 const colorOf = (n: number): Pick =>
   n === 0 ? 'green' : REDS.has(n) ? 'red' : 'black'
@@ -175,21 +178,28 @@ export const register: Register = on => {
     // A reload drops the old timer: land any spin it left mid-air.
     await update($, game, settle)
 
-    const stored = await $.store.get(MODE_KEY)
-    if (isMode(stored)) {
-      await update($, mode, () => stored)
-    }
     const muted = await $.store.get(MUTED_KEY)
     if (typeof muted === 'boolean') {
       await update($, isMuted, () => muted)
     }
     await $.command.register({
       name: 'roulette',
-      description: 'Roulette table: show it always, or only while Claude thinks',
-      argumentHint: '[always|thinking|reset|mute|unmute]',
+      description: 'Open or close the roulette table beside the conversation',
+      argumentHint: '[reset|mute|unmute]',
       immediate: true,
     })
+    // Unasked, it waits undrawn on a narrow terminal until it widens.
+    if ((await $.store.get(OPEN_KEY)) === true) {
+      await $.ui.open({ id: PANE, title: 'Roulette', columns: PANE_COLUMNS })
+    }
 
+    return next(e)
+  })
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind !== 'unload') {
+      await $.store.set(OPEN_KEY, false)
+    }
     return next(e)
   })
 
@@ -215,49 +225,47 @@ export const register: Register = on => {
       await $.store.set(MUTED_KEY, muted)
       return { text: muted ? 'Roulette sounds off.' : 'Roulette sounds on.' }
     }
-    if (asked !== '' && !isMode(asked)) {
-      return { text: 'Usage: /roulette [always|thinking|reset|mute|unmute]' }
+    if (asked !== '') {
+      return { text: 'Usage: /roulette [reset|mute|unmute]' }
     }
-    const current = await read($, mode)
-    const chosen: Mode =
-      asked !== '' ? asked : current === 'always' ? 'thinking' : 'always'
-    await update($, mode, () => chosen)
-    await $.store.set(MODE_KEY, chosen)
+    if ((await $.ui.panes()).some(pane => pane.id === PANE)) {
+      await $.ui.close({ id: PANE })
+      return { text: 'Roulette table closed.' }
+    }
+    const opened = await $.ui.open({ id: PANE, title: 'Roulette', columns: PANE_COLUMNS })
+    await $.store.set(OPEN_KEY, true)
 
     return {
-      text:
-        chosen === 'always'
-          ? 'Roulette table is always shown.'
-          : 'Roulette table shows only while Claude is thinking.',
+      text: opened.isPlaced
+        ? 'Roulette table opened.'
+        : `Roulette table opened; not shown yet: ${opened.reason}`,
     }
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (
-      e.props.hasSurvey ||
-      (!e.props.isWorking && (await read($, mode)) !== 'always')
-    ) {
-      return next(e)
-    }
-
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const g = await read($, game)
     const pointer = g.spin
       ? pointerAt(g.spin.from, g.spin.distance, g.spin.frame)
       : g.pointer
-    // The biggest wheel (odd rows) the band's rows and the table's width
-    // leave room for; none below the smallest.
-    let wheelRows = Math.min(MAX_WHEEL_ROWS, e.props.maxRows)
+    // Docked, the wheel goes under the table, as wide as the pane; inline,
+    // beside it, as tall as the pane. The biggest (odd rows) that fits, none
+    // below the smallest.
+    const isDocked = e.props.placement === 'dock'
+    const { bodyColumns } = e.props
+    let wheelRows = Math.min(
+      MAX_WHEEL_ROWS,
+      isDocked ? e.props.scroll.bodyRows - TABLE_ROWS : e.props.scroll.bodyRows,
+    )
     wheelRows -= 1 - (wheelRows % 2)
     while (
       wheelRows >= MIN_WHEEL_ROWS &&
-      TABLE_COLUMNS + 2 + wheelColumnsOf(wheelRows) > e.props.bodyColumns
+      wheelColumnsOf(wheelRows) + (isDocked ? 0 : TABLE_COLUMNS + 2) > bodyColumns
     ) {
       wheelRows -= 2
     }
     const hasArt = e.surface === 'terminal' && wheelRows >= MIN_WHEEL_ROWS
-    const shown =
-      Math.max(3, Math.min(13, Math.floor((e.props.bodyColumns - 2) / 4))) | 1
+    const shown = Math.max(3, Math.min(13, Math.floor((bodyColumns - 2) / 4))) | 1
     const half = (shown - 1) / 2
     const pockets = Array.from({ length: shown }, (_, i) => {
       const index = (pointer - half + i + WHEEL.length * 2) % WHEEL.length
@@ -280,7 +288,7 @@ export const register: Register = on => {
 
     const table = (
       <Box flexDirection="column">
-        <Box flexDirection="row" gap={2}>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
           <Text bold>Roulette</Text>
           <Text>
             Balance <Text bold>{money(g.balance)}</Text>
@@ -322,7 +330,7 @@ export const register: Register = on => {
           </Text>
         ) : (
           <Box flexDirection="column">
-            <Box key="chips" flexDirection="row" gap={2}>
+            <Box key="chips" flexDirection="row" flexWrap="wrap" columnGap={2}>
               {CHIPS.map(chip => (
                 <Button
                   key={`chip-${chip.hotkey}`}
@@ -334,7 +342,7 @@ export const register: Register = on => {
                 />
               ))}
             </Box>
-            <Box key="picks" flexDirection="row" gap={2}>
+            <Box key="picks" flexDirection="row" flexWrap="wrap" columnGap={2}>
               {PICKS.map(p => (
                 <Button
                   key={`pick-${p.pick}`}
@@ -366,13 +374,15 @@ export const register: Register = on => {
     }
     const { Raster } = $.ui.resolve(e)
 
-    return (
-      <Box
-        flexDirection="row"
-        gap={2}
-        width={e.props.bodyColumns}
-        justifyContent="space-between"
-      >
+    return isDocked ? (
+      <Box flexDirection="column" gap={1} width={bodyColumns}>
+        <Box justifyContent="center">
+          <Raster key="wheel-art" {...art} />
+        </Box>
+        {table}
+      </Box>
+    ) : (
+      <Box flexDirection="row" gap={2} width={bodyColumns} justifyContent="space-between">
         {table}
         <Raster key="wheel-art" {...art} />
       </Box>
