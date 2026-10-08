@@ -27,6 +27,6 @@ export type Game = {
 
 declare module 'claude-code' {
   interface PluginState {
-    roulette: { game: Game; mode: Mode }
+    roulette: { game: Game; mode: Mode; isMuted: boolean }
   }
 }

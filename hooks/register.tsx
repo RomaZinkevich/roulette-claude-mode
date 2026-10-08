@@ -47,6 +47,8 @@ const INITIAL: Game = {
 const game = atom({ plugin: 'roulette', key: 'game' } as const, INITIAL)
 const mode = atom({ plugin: 'roulette', key: 'mode' } as const, 'thinking' as Mode)
 const MODE_KEY = 'mode'
+const isMuted = atom({ plugin: 'roulette', key: 'isMuted' } as const, false)
+const MUTED_KEY = 'isMuted'
 
 const isMode = (value: unknown): value is Mode =>
   value === 'thinking' || value === 'always'
@@ -109,10 +111,27 @@ const settle = (g: Game): Game => {
 
 let ticker: { cancel: () => void } | null = null
 
+// Plays one of the mod's sounds unless muted; a terminal with no player
+// (Linux, Windows) plays nothing, and a failure is never the game's.
+const playSound = async ($: EngineInterface, name: string) => {
+  if (await read($, isMuted)) {
+    return
+  }
+  await $.audio.play({ asset: `sounds/${name}` }).catch(() => undefined)
+}
+
 const finish = async ($: EngineInterface) => {
   ticker?.cancel()
   ticker = null
   await update($, game, settle)
+
+  const { last } = await read($, game)
+  if (last) {
+    void playSound(
+      $,
+      last.delta <= 0 ? 'lose.wav' : last.pick === 'green' ? 'jackpot.wav' : 'win.wav',
+    )
+  }
 }
 
 const play = async ($: EngineInterface, pick: Pick) => {
@@ -141,6 +160,7 @@ const play = async ($: EngineInterface, pick: Pick) => {
     return
   }
 
+  void playSound($, 'spin.wav')
   ticker?.cancel()
   ticker = $.clock.every(FRAME_MS, () => {
     void update($, game, current =>
@@ -165,10 +185,14 @@ export const register: Register = on => {
     if (isMode(stored)) {
       await update($, mode, () => stored)
     }
+    const muted = await $.store.get(MUTED_KEY)
+    if (typeof muted === 'boolean') {
+      await update($, isMuted, () => muted)
+    }
     await $.command.register({
       name: 'roulette',
       description: 'Roulette table: show it always, or only while Claude thinks',
-      argumentHint: '[always|thinking|reset]',
+      argumentHint: '[always|thinking|reset|mute|unmute]',
       immediate: true,
     })
 
@@ -191,8 +215,14 @@ export const register: Register = on => {
       await update($, game, g => ({ ...INITIAL, bet: g.bet, pointer: g.pointer }))
       return { text: `Roulette bankroll reset to ${money(BANKROLL)}.` }
     }
+    if (asked === 'mute' || asked === 'unmute') {
+      const muted = asked === 'mute'
+      await update($, isMuted, () => muted)
+      await $.store.set(MUTED_KEY, muted)
+      return { text: muted ? 'Roulette sounds off.' : 'Roulette sounds on.' }
+    }
     if (asked !== '' && !isMode(asked)) {
-      return { text: 'Usage: /roulette [always|thinking|reset]' }
+      return { text: 'Usage: /roulette [always|thinking|reset|mute|unmute]' }
     }
     const current = await read($, mode)
     const chosen: Mode =

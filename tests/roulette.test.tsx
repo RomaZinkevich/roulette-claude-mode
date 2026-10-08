@@ -135,3 +135,26 @@ test('/roulette reset refills a busted bankroll mid-turn', async ($, on) => {
   expect(await ui.find({ key: 'pick-red' })).toBeDefined()
   await ui.unmount()
 })
+
+test('a spin plays its sound, then the result; /roulette mute silences both', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  on('command.run', () => ({ text: '' }))
+  const played: string[] = []
+  on('audio.play', async ($, e) => {
+    played.push(String((e.clip as { asset?: string }).asset ?? JSON.stringify(e.clip)))
+    return { value: undefined } as never
+  })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal', props: props(true) as never })
+
+  await ui.press({ key: 'pick-red' })
+  await clock.advance(5000)
+  expect(played[0]).toMatch(/spin\.wav/)
+  expect(played[1]).toMatch(/(win|lose)\.wav/)
+
+  await $.command.run({ command: 'roulette', args: 'mute' } as never)
+  await ui.press({ key: 'pick-black' })
+  await clock.advance(5000)
+  expect(played).toHaveLength(2)
+  await ui.unmount()
+})
